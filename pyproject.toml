@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "evalkit"
+version = "0.1.0"
+description = "CLI-first LLM evaluation framework with YAML test suites, 4 metric types, and CI-blocking thresholds"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+authors = [{ name = "Ferris Akkad", email = "ferrisakkad@gmail.com" }]
+keywords = ["llm", "evaluation", "testing", "ai", "metrics"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Testing",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "typer>=0.9.0",
+    "pydantic>=2.0",
+    "rich>=13.0",
+    "pyyaml>=6.0",
+    "anthropic>=0.40.0",
+    "sentence-transformers>=3.0",
+    "jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+evalkit = "evalkit.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/evalkit"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

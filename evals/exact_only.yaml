@@ -1,0 +1,23 @@
+schema_version: 1
+name: exact-match-only
+description: Simple exact match suite for testing without LLM calls
+model: claude-sonnet-4-20250514
+suite_pass_rate: 1.0
+
+cases:
+  - id: capital-uk
+    input: "What is the capital of the United Kingdom?"
+    expected: "London"
+    metrics:
+      - type: exact_match
+        threshold: 1.0
+        params:
+          normalize: true
+          ignore_case: true
+
+  - id: planet-count
+    input: "How many planets are in our solar system?"
+    expected: "8"
+    metrics:
+      - type: exact_match
+        threshold: 1.0

@@ -1,0 +1,59 @@
+schema_version: 1
+name: qa-basic
+description: Basic QA evaluation suite for demo purposes
+model: claude-sonnet-4-20250514
+suite_pass_rate: 0.8
+
+cases:
+  - id: capital-france
+    input: "What is the capital of France?"
+    expected: "Paris"
+    metrics:
+      - type: exact_match
+        threshold: 1.0
+        params:
+          normalize: true
+          ignore_case: true
+
+  - id: explain-photosynthesis
+    input: "Explain photosynthesis in one sentence."
+    expected: "Photosynthesis is the process by which plants convert sunlight, water, and carbon dioxide into glucose and oxygen."
+    metrics:
+      - type: semantic_sim
+        threshold: 0.75
+        weight: 1.0
+
+  - id: summarize-gravity
+    input: "Summarize Newton's law of universal gravitation in plain English."
+    expected: "Every object attracts every other object with a force proportional to the product of their masses and inversely proportional to the square of the distance between them."
+    metrics:
+      - type: semantic_sim
+        threshold: 0.7
+        weight: 0.6
+      - type: llm_judge
+        threshold: 0.6
+        weight: 0.4
+        params:
+          criteria: "Accuracy, clarity, and completeness of the explanation."
+          task: "Evaluate whether the summary correctly captures Newton's law of gravitation."
+
+  - id: python-fizzbuzz
+    input: "Write a Python function that prints FizzBuzz for numbers 1 to 15."
+    expected: "def fizzbuzz():\n    for i in range(1, 16):\n        if i % 15 == 0:\n            print('FizzBuzz')\n        elif i % 3 == 0:\n            print('Fizz')\n        elif i % 5 == 0:\n            print('Buzz')\n        else:\n            print(i)"
+    metrics:
+      - type: rubric
+        threshold: 1.0
+        params:
+          assertion: "The output contains a valid Python function that correctly implements FizzBuzz for numbers 1 through 15."
+          input: "Write a Python function that prints FizzBuzz for numbers 1 to 15."
+
+  - id: sentiment-positive
+    input: "Classify the sentiment: 'This product is absolutely wonderful and exceeded all my expectations!'"
+    expected: "positive"
+    metrics:
+      - type: exact_match
+        threshold: 1.0
+        params:
+          normalize: true
+          ignore_case: true
+          ignore_punctuation: true
