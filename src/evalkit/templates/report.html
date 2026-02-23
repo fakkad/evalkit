@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EvalKit Report — {{ result.suite_name }}</title>
+<style>
+  :root {
+    --pass: #22c55e;
+    --fail: #ef4444;
+    --warn: #eab308;
+    --bg: #0f172a;
+    --card: #1e293b;
+    --text: #e2e8f0;
+    --dim: #94a3b8;
+    --border: #334155;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 2rem;
+    line-height: 1.5;
+  }
+  h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+  .subtitle { color: var(--dim); margin-bottom: 1.5rem; font-size: 0.875rem; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 1rem;
+    margin-bottom: 2rem;
+  }
+  .card {
+    background: var(--card);
+    border-radius: 8px;
+    padding: 1.25rem;
+  }
+  .card h2 {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin-bottom: 0.5rem;
+    letter-spacing: 0.05em;
+  }
+  .stat { font-size: 2rem; font-weight: 700; }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .badge-pass { background: var(--pass); color: #000; }
+  .badge-fail { background: var(--fail); color: #fff; }
+
+  /* Summary table */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 1rem;
+  }
+  th, td {
+    padding: 0.625rem 0.75rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    color: var(--dim);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .bar {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--border);
+    width: 120px;
+  }
+  .bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.3s;
+  }
+  .score-high { background: var(--pass); }
+  .score-mid { background: var(--warn); }
+  .score-low { background: var(--fail); }
+
+  /* Expandable details */
+  details {
+    margin-top: 0.5rem;
+  }
+  details summary {
+    cursor: pointer;
+    color: var(--dim);
+    font-size: 0.8rem;
+  }
+  details pre {
+    background: var(--bg);
+    padding: 0.75rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    overflow-x: auto;
+    margin-top: 0.25rem;
+    color: var(--dim);
+  }
+
+  .threshold-table .violation {
+    color: var(--fail);
+    font-weight: 600;
+  }
+  .threshold-table .ok {
+    color: var(--pass);
+  }
+
+  .footer {
+    margin-top: 2rem;
+    color: var(--dim);
+    font-size: 0.75rem;
+    border-top: 1px solid var(--border);
+    padding-top: 1rem;
+  }
+</style>
+</head>
+<body>
+
+<h1>EvalKit Report</h1>
+<div class="subtitle">{{ result.suite_name }}{% if result.description %} &mdash; {{ result.description }}{% endif %}</div>
+
+<!-- Summary cards -->
+<div class="grid">
+  <div class="card">
+    <h2>Status</h2>
+    <div class="stat">
+      <span class="badge {% if result.passed %}badge-pass{% else %}badge-fail{% endif %}">
+        {% if result.passed %}PASSED{% else %}FAILED{% endif %}
+      </span>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Model</h2>
+    <div style="font-size: 1rem; font-weight: 600;">{{ result.model_config_used.model }}</div>
+    <div style="color: var(--dim); font-size: 0.8rem;">{{ result.model_config_used.provider }}</div>
+  </div>
+  <div class="card">
+    <h2>Test Cases</h2>
+    <div class="stat">{{ result.total_cases }}</div>
+  </div>
+  <div class="card">
+    <h2>Duration</h2>
+    <div class="stat">{{ "%.0f"|format(result.duration_ms) }}ms</div>
+  </div>
+</div>
+
+<!-- Metric scores & thresholds -->
+<div class="card" style="margin-bottom: 2rem;">
+  <h2>Metric Summary</h2>
+  <table class="threshold-table">
+    <tr>
+      <th>Metric</th>
+      <th>Score</th>
+      <th>Threshold</th>
+      <th>Status</th>
+      <th>Score Bar</th>
+    </tr>
+    {% for metric_name, score in result.aggregate_scores.items() %}
+    {% set threshold = result.model_config_used.params.get('thresholds', {}).get(metric_name) %}
+    <tr>
+      <td>{{ metric_name }}</td>
+      <td>{{ "%.4f"|format(score) }}</td>
+      <td>
+        {% set t = namespace(val=none) %}
+        {% for v in result.threshold_violations if v.metric_name == metric_name %}
+          {% set t.val = v.expected %}
+        {% endfor %}
+        {% if t.val is not none %}
+          {{ "%.2f"|format(t.val) }}
+        {% else %}
+          {% for tn, tv in (result.__dict__.get('_thresholds', {}) or {}).items() if tn == metric_name %}
+            {{ "%.2f"|format(tv) }}
+          {% else %}
+            &mdash;
+          {% endfor %}
+        {% endif %}
+      </td>
+      <td>
+        {% set violated = false %}
+        {% for v in result.threshold_violations if v.metric_name == metric_name %}
+          {% set violated = true %}
+        {% endfor %}
+        {% if violated %}
+          <span class="violation">FAIL</span>
+        {% else %}
+          <span class="ok">PASS</span>
+        {% endif %}
+      </td>
+      <td>
+        <div class="bar">
+          <div class="bar-fill {% if score >= 0.8 %}score-high{% elif score >= 0.5 %}score-mid{% else %}score-low{% endif %}"
+               style="width: {{ (score * 100)|int }}%;"></div>
+        </div>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<!-- Per-case results -->
+<div class="card">
+  <h2>Per-Case Results</h2>
+  <table>
+    <tr>
+      <th>Case ID</th>
+      <th>Status</th>
+      <th>Metrics</th>
+      <th>Details</th>
+    </tr>
+    {% for r in result.results %}
+    <tr>
+      <td>{{ r.test_case_id }}</td>
+      <td>
+        <span class="badge {% if r.passed %}badge-pass{% else %}badge-fail{% endif %}">
+          {% if r.passed %}PASS{% else %}FAIL{% endif %}
+        </span>
+      </td>
+      <td style="font-size: 0.8rem; color: var(--dim);">
+        {% for mr in r.metric_results %}
+          {{ mr.metric_name }}: {{ "%.3f"|format(mr.score) }}{% if not loop.last %}, {% endif %}
+        {% endfor %}
+      </td>
+      <td>
+        <details>
+          <summary>expand</summary>
+          <pre>Response: {{ r.model_response[:500] }}{% if r.model_response|length > 500 %}...{% endif %}
+
+{% for mr in r.metric_results %}
+{{ mr.metric_name }}:
+  score: {{ "%.4f"|format(mr.score) }}
+  {% for k, v in mr.details.items() %}{{ k }}: {{ v }}
+  {% endfor %}
+{% endfor %}</pre>
+        </details>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+{% if result.threshold_violations %}
+<div class="card" style="margin-top: 2rem; border: 1px solid var(--fail);">
+  <h2 style="color: var(--fail);">Threshold Violations</h2>
+  <table>
+    <tr>
+      <th>Metric</th>
+      <th>Required</th>
+      <th>Actual</th>
+      <th>Gap</th>
+    </tr>
+    {% for v in result.threshold_violations %}
+    <tr>
+      <td>{{ v.metric_name }}</td>
+      <td>{{ "%.4f"|format(v.expected) }}</td>
+      <td class="violation">{{ "%.4f"|format(v.actual) }}</td>
+      <td class="violation">{{ "%.4f"|format(v.actual - v.expected) }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+<div class="footer">
+  Generated by EvalKit v{{ version }} &middot; {{ result.timestamp[:19] }}
+</div>
+
+</body>
+</html>

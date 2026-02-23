@@ -15,5 +15,3 @@ venv/
 .mypy_cache/
 .ruff_cache/
 results/
-*.jsonl
-!evals/*.jsonl

@@ -1,39 +1,30 @@
-"""Threshold engine — determines suite pass/fail and exit codes."""
+"""Threshold engine -- compare aggregate scores against thresholds."""
 
 from __future__ import annotations
 
-from evalkit.models import EvalResult, TestResult
+from evalkit.models import ThresholdViolation
 
 
-def evaluate_suite(
-    suite_name: str,
-    model: str,
-    results: list[TestResult],
-    suite_pass_rate: float = 1.0,
-) -> EvalResult:
-    """Compute suite-level pass/fail from individual case results.
+def check_thresholds(
+    aggregate_scores: dict[str, float],
+    thresholds: dict[str, float],
+) -> list[ThresholdViolation]:
+    """Compare aggregate scores against thresholds.
 
-    Exit code semantics:
-      0 = all passed
-      1 = suite failed (pass rate below threshold)
-      2 = error during evaluation
+    If ANY metric falls below its threshold, the suite fails.
+    Returns list of violations with metric name, expected, actual.
     """
-    total = len(results)
-    passed_cases = sum(1 for r in results if r.passed)
-    failed_cases = total - passed_cases
-    pass_rate = passed_cases / total if total > 0 else 0.0
-    mean_score = sum(r.weighted_score for r in results) / total if total > 0 else 0.0
+    violations: list[ThresholdViolation] = []
 
-    return EvalResult(
-        suite_name=suite_name,
-        model=model,
-        results=results,
-        pass_rate=pass_rate,
-        passed=pass_rate >= suite_pass_rate,
-        total_cases=total,
-        passed_cases=passed_cases,
-        failed_cases=failed_cases,
-        mean_score=mean_score,
-        total_latency_ms=sum(r.latency_ms for r in results),
-        total_tokens=sum(r.tokens_used for r in results),
-    )
+    for metric_name, threshold in thresholds.items():
+        actual = aggregate_scores.get(metric_name, 0.0)
+        if actual < threshold:
+            violations.append(
+                ThresholdViolation(
+                    metric_name=metric_name,
+                    expected=threshold,
+                    actual=actual,
+                )
+            )
+
+    return violations

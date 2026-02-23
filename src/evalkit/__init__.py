@@ -1,3 +1,3 @@
-"""EvalKit — CLI-first LLM evaluation framework."""
+"""EvalKit -- CLI eval harness for LLMs."""
 
 __version__ = "0.1.0"

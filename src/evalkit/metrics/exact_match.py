@@ -1,32 +1,44 @@
-"""Exact match metric — string/normalized comparison."""
+"""Exact match metric -- normalized string comparison."""
 
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 from typing import Any
 
-from evalkit.models import MetricResult, MetricType
+from evalkit.metrics.base import Metric
+from evalkit.models import MetricResult
 
 
-class ExactMatchMetric:
-    """Compare actual output to expected via exact or normalized string match."""
+class ExactMatchMetric(Metric):
+    """Compare output to expected via exact or normalized string match.
 
-    metric_type = MetricType.EXACT_MATCH
+    Supports lowercase normalization, whitespace stripping, punctuation
+    removal, and optional fuzzy matching via SequenceMatcher.
+    """
 
-    def score(
+    async def score(
         self,
-        expected: str,
-        actual: str,
-        threshold: float = 1.0,
+        input: str,
+        output: str,
+        expected: str | None = None,
         params: dict[str, Any] | None = None,
     ) -> MetricResult:
         params = params or {}
         normalize = params.get("normalize", True)
         ignore_case = params.get("ignore_case", True)
         ignore_punctuation = params.get("ignore_punctuation", False)
+        fuzzy_threshold = params.get("fuzzy_threshold", None)
+
+        if expected is None:
+            return MetricResult(
+                metric_name="exact_match",
+                score=0.0,
+                details={"error": "no expected_output provided"},
+            )
 
         e = expected
-        a = actual
+        a = output
 
         if normalize:
             e = " ".join(e.split())
@@ -40,17 +52,19 @@ class ExactMatchMetric:
             e = re.sub(r"[^\w\s]", "", e)
             a = re.sub(r"[^\w\s]", "", a)
 
-        match = e == a
-        score_val = 1.0 if match else 0.0
+        if e == a:
+            score_val = 1.0
+        elif fuzzy_threshold is not None:
+            score_val = SequenceMatcher(None, e, a).ratio()
+        else:
+            score_val = 1.0 if e == a else 0.0
 
         return MetricResult(
-            metric_type=self.metric_type,
+            metric_name="exact_match",
             score=score_val,
-            passed=score_val >= threshold,
-            threshold=threshold,
             details={
                 "expected_normalized": e,
                 "actual_normalized": a,
-                "exact_match": match,
+                "exact_match": e == a,
             },
         )

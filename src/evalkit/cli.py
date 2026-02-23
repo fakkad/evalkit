@@ -1,4 +1,4 @@
-"""EvalKit CLI — typer-based command interface."""
+"""EvalKit CLI -- typer-based command interface."""
 
 from __future__ import annotations
 
@@ -8,14 +8,16 @@ from pathlib import Path
 from typing import Optional
 
 import typer
+import yaml
 from rich.console import Console
 from rich.table import Table
 
 from evalkit import __version__
+from evalkit.models import TestSuite
 
 app = typer.Typer(
     name="evalkit",
-    help="CLI-first LLM evaluation framework.",
+    help="CLI eval harness for LLMs.",
     no_args_is_help=True,
 )
 console = Console()
@@ -23,113 +25,169 @@ console = Console()
 
 @app.command()
 def run(
-    suite: Path = typer.Argument(..., help="Path to YAML eval suite"),
-    model: Optional[str] = typer.Option(None, "--model", "-m", help="Override model"),
-    output: Optional[Path] = typer.Option(
-        None, "--output", "-o", help="Save results to JSONL"
+    suite_path: Path = typer.Argument(..., help="Path to YAML eval suite"),
+    output_dir: Optional[Path] = typer.Option(
+        None, "--output-dir", "-o", help="Directory to save results"
+    ),
+    format: str = typer.Option(
+        "both", "--format", "-f", help="Output format: json, html, or both"
     ),
 ) -> None:
     """Run an eval suite against a model."""
+    from evalkit.report import generate_html, save_json
     from evalkit.runner import run_suite
 
-    result = run_suite(suite_path=suite, model_override=model, output_path=output)
+    result = run_suite(suite_path)
+
+    # Print summary
+    _print_summary(result)
+
+    # Save outputs
+    if output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if format in ("json", "both"):
+            json_path = save_json(result, output_dir / "results.json")
+            console.print(f"[dim]JSON results: {json_path}[/dim]")
+        if format in ("html", "both"):
+            html_path = generate_html(result, output_dir / "report.html")
+            console.print(f"[dim]HTML report: {html_path}[/dim]")
+
     if not result.passed:
         raise typer.Exit(code=1)
 
 
 @app.command()
 def compare(
-    baseline: Path = typer.Argument(..., help="Baseline results JSONL"),
-    current: Path = typer.Argument(..., help="Current results JSONL"),
+    results1: Path = typer.Argument(..., help="First results JSON file"),
+    results2: Path = typer.Argument(..., help="Second results JSON file"),
+    output: Optional[Path] = typer.Option(
+        None, "--output", "-o", help="Output HTML diff report path"
+    ),
 ) -> None:
-    """Compare two result sets and show regressions."""
-    from evalkit.loader import load_results
+    """Compare two eval result sets and show regressions."""
+    from evalkit.compare import generate_diff_html, print_comparison
+    from evalkit.report import load_json
 
-    base = load_results(baseline)
-    curr = load_results(current)
+    r1 = load_json(results1)
+    r2 = load_json(results2)
 
-    base_map = {r.case_id: r for r in base.results}
-    curr_map = {r.case_id: r for r in curr.results}
+    print_comparison(r1, r2)
 
-    all_ids = sorted(set(base_map) | set(curr_map))
+    if output:
+        generate_diff_html(r1, r2, output)
+        console.print(f"\n[dim]Diff report: {output}[/dim]")
 
-    table = Table(title="Comparison: Baseline vs Current")
-    table.add_column("Case ID", style="bold")
-    table.add_column("Baseline", justify="center")
-    table.add_column("Current", justify="center")
-    table.add_column("Delta", justify="right")
-    table.add_column("Status")
+    # Exit non-zero if regressions
+    from evalkit.compare import compare_results
 
-    regressions = 0
-    improvements = 0
-
-    for case_id in all_ids:
-        b = base_map.get(case_id)
-        c = curr_map.get(case_id)
-
-        b_score = f"{b.weighted_score:.3f}" if b else "—"
-        c_score = f"{c.weighted_score:.3f}" if c else "—"
-
-        if b and c:
-            delta = c.weighted_score - b.weighted_score
-            delta_str = f"{delta:+.3f}"
-            if c.passed and not b.passed:
-                status = "[green]FIXED[/green]"
-                improvements += 1
-            elif not c.passed and b.passed:
-                status = "[red]REGRESSED[/red]"
-                regressions += 1
-            elif delta > 0.01:
-                status = "[green]IMPROVED[/green]"
-                improvements += 1
-            elif delta < -0.01:
-                status = "[yellow]DEGRADED[/yellow]"
-                regressions += 1
-            else:
-                status = "[dim]UNCHANGED[/dim]"
-        elif c and not b:
-            delta_str = "NEW"
-            status = "[blue]NEW[/blue]"
-        else:
-            delta_str = "REMOVED"
-            status = "[dim]REMOVED[/dim]"
-
-        table.add_row(case_id, b_score, c_score, delta_str, status)
-
-    console.print(table)
-
-    summary = Table(title="Summary")
-    summary.add_column("Metric", style="bold")
-    summary.add_column("Value", justify="right")
-    summary.add_row("Baseline Pass Rate", f"{base.pass_rate:.1%}")
-    summary.add_row("Current Pass Rate", f"{curr.pass_rate:.1%}")
-    summary.add_row(
-        "Delta", f"{(curr.pass_rate - base.pass_rate):+.1%}"
-    )
-    summary.add_row("Regressions", f"[red]{regressions}[/red]")
-    summary.add_row("Improvements", f"[green]{improvements}[/green]")
-    console.print(summary)
-
-    if regressions > 0:
+    comp = compare_results(r1, r2)
+    if comp["regressions"]:
         raise typer.Exit(code=1)
 
 
 @app.command()
-def report(
-    results_dir: Path = typer.Argument(..., help="Directory containing result JSONL files"),
-    output: Path = typer.Option("report.html", "--output", "-o", help="Output HTML path"),
+def validate(
+    suite_path: Path = typer.Argument(..., help="Path to YAML eval suite"),
 ) -> None:
-    """Generate an HTML report from result files."""
-    from evalkit.reporter import generate_report
-
-    generate_report(results_dir, output)
-    console.print(f"[green]Report generated:[/green] {output}")
+    """Validate a YAML test suite configuration."""
+    try:
+        with suite_path.open() as f:
+            data = yaml.safe_load(f)
+        suite = TestSuite(**data)
+        console.print(f"[green]Valid[/green] suite: {suite.name}")
+        console.print(f"  Test cases: {len(suite.test_cases)}")
+        console.print(f"  Metrics: {', '.join(m.type for m in suite.metrics)}")
+        console.print(f"  Provider: {suite.model.provider}")
+        console.print(f"  Model: {suite.model.model}")
+        if suite.thresholds:
+            console.print(f"  Thresholds: {suite.thresholds}")
+    except Exception as e:
+        console.print(f"[red]Invalid[/red]: {e}")
+        raise typer.Exit(code=1)
 
 
 @app.command()
-def version() -> None:
-    """Show version."""
-    console.print(f"evalkit {__version__}")
+def init(
+    output: Path = typer.Option(
+        Path("suite.yaml"), "--output", "-o", help="Output YAML path"
+    ),
+) -> None:
+    """Generate an example YAML test suite."""
+    example = {
+        "name": "my-eval-suite",
+        "description": "Example evaluation suite",
+        "model": {
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-20250514",
+            "params": {"temperature": 0, "max_tokens": 1024},
+        },
+        "test_cases": [
+            {
+                "id": "greeting-1",
+                "input": "Hello, I need help with my order",
+                "expected_output": "I'd be happy to help you with your order",
+                "metadata": {"category": "greeting"},
+            },
+            {
+                "id": "factual-1",
+                "input": "What is the capital of France?",
+                "expected_output": "Paris",
+                "metadata": {"category": "factual"},
+            },
+        ],
+        "metrics": [
+            {"type": "exact_match"},
+            {
+                "type": "semantic_similarity",
+                "params": {"model": "text-embedding-3-small"},
+            },
+        ],
+        "thresholds": {"exact_match": 0.5, "semantic_similarity": 0.8},
+    }
+
+    with output.open("w") as f:
+        yaml.dump(example, f, default_flow_style=False, sort_keys=False)
+
+    console.print(f"[green]Created[/green] example suite: {output}")
+
+
+def _print_summary(result) -> None:
+    """Print a rich summary table of the eval run."""
+    console.print()
+    table = Table(title="Eval Summary")
+    table.add_column("Metric", style="bold")
+    table.add_column("Score", justify="right")
+    table.add_column("Threshold", justify="right")
+    table.add_column("Status", justify="center")
+
+    for metric_name, score in result.aggregate_scores.items():
+        threshold = None
+        for v in result.threshold_violations:
+            if v.metric_name == metric_name:
+                threshold = v.expected
+                break
+
+        threshold_str = f"{threshold:.2f}" if threshold is not None else "--"
+        is_violation = threshold is not None
+        status = "[red]FAIL[/red]" if is_violation else "[green]PASS[/green]"
+
+        table.add_row(metric_name, f"{score:.4f}", threshold_str, status)
+
+    console.print(table)
+
+    overall = "[green]PASSED[/green]" if result.passed else "[red]FAILED[/red]"
+    console.print(f"\n  Suite: {result.suite_name} | Status: {overall}")
+    console.print(
+        f"  Cases: {result.total_cases} | Duration: {result.duration_ms:.0f}ms\n"
+    )
+
+    if result.threshold_violations:
+        console.print("[red]Threshold violations:[/red]")
+        for v in result.threshold_violations:
+            console.print(
+                f"  {v.metric_name}: {v.actual:.4f} < {v.expected:.4f}"
+            )
+        console.print()
 
 
 if __name__ == "__main__":

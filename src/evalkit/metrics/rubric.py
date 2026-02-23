@@ -1,92 +1,184 @@
-"""Rubric metric — binary pass/fail LLM assertion."""
+"""Rubric metric -- multi-criteria weighted rubric evaluation via LLM."""
 
 from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 
-from evalkit.models import MetricResult, MetricType
+import httpx
 
-_RUBRIC_SYSTEM = """You are a strict evaluator. Given a rubric assertion, determine if the actual output satisfies it.
+from evalkit.metrics.base import Metric
+from evalkit.models import MetricResult
 
-Return ONLY valid JSON:
+_RUBRIC_SYSTEM = """You are an expert evaluator. You will score a response on a specific criterion.
+
+Return ONLY valid JSON with this schema:
 {
-  "passed": true/false,
-  "reasoning": "brief explanation"
+  "justification": "your reasoning for the score",
+  "score": <integer 1-5>
 }"""
 
-_RUBRIC_PROMPT = """## Assertion
-{assertion}
-
-## Input
+_RUBRIC_PROMPT = """## Original Prompt
 {input}
+
+## LLM Response
+{output}
 
 ## Expected Output (reference)
 {expected}
 
-## Actual Output
-{actual}
+## Criterion
+**{criterion}**: {description}
 
-Does the actual output satisfy the assertion? Be strict."""
+Score the response on this criterion from 1 (does not meet) to 5 (fully meets). Provide justification."""
 
 
-class RubricMetric:
-    """Binary pass/fail LLM assertion against a rubric statement."""
+async def _score_criterion(
+    client: httpx.AsyncClient,
+    input_text: str,
+    output: str,
+    expected: str,
+    criterion: str,
+    description: str,
+    model: str,
+    provider: str,
+) -> dict[str, Any]:
+    """Score a single rubric criterion."""
+    api_key_env = "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY"
+    api_key = os.environ.get(api_key_env, "")
 
-    metric_type = MetricType.RUBRIC
+    prompt = _RUBRIC_PROMPT.format(
+        input=input_text,
+        output=output,
+        expected=expected or "(none provided)",
+        criterion=criterion,
+        description=description,
+    )
 
-    def score(
+    try:
+        if provider == "anthropic":
+            response = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "max_tokens": 512,
+                    "temperature": 0,
+                    "system": _RUBRIC_SYSTEM,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=60.0,
+            )
+            response.raise_for_status()
+            data = response.json()
+            text = data["content"][0]["text"]
+        else:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "temperature": 0,
+                    "max_tokens": 512,
+                    "messages": [
+                        {"role": "system", "content": _RUBRIC_SYSTEM},
+                        {"role": "user", "content": prompt},
+                    ],
+                },
+                timeout=60.0,
+            )
+            response.raise_for_status()
+            data = response.json()
+            text = data["choices"][0]["message"]["content"]
+
+        result = json.loads(text)
+        return {
+            "criterion": criterion,
+            "score": max(1, min(5, int(result.get("score", 3)))),
+            "justification": result.get("justification", ""),
+        }
+    except (httpx.HTTPStatusError, json.JSONDecodeError, KeyError):
+        # Fallback
+        try:
+            match = re.search(r"\b([1-5])\b", text)  # type: ignore[possibly-undefined]
+            score = int(match.group(1)) if match else 3
+        except Exception:
+            score = 3
+        return {
+            "criterion": criterion,
+            "score": score,
+            "justification": "parse error",
+        }
+
+
+class RubricMetric(Metric):
+    """Multi-criteria rubric evaluation. Each criterion scored 1-5 by LLM,
+    weighted average normalized to 0-1."""
+
+    async def score(
         self,
-        expected: str,
-        actual: str,
-        threshold: float = 1.0,
+        input: str,
+        output: str,
+        expected: str | None = None,
         params: dict[str, Any] | None = None,
     ) -> MetricResult:
         params = params or {}
-        assertion = params.get("assertion", "The output is accurate and complete.")
-        input_text = params.get("input", "")
-        judge_model = params.get("judge_model", "claude-haiku-4-5-20241022")
+        rubric_items = params.get("rubric", [])
+        model = params.get("model", "claude-haiku-4-5-20251001")
 
-        import anthropic
+        if not rubric_items:
+            return MetricResult(
+                metric_name="rubric",
+                score=0.0,
+                details={"error": "no rubric criteria provided"},
+            )
 
-        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        # Determine provider from model name
+        if "claude" in model:
+            provider = "anthropic"
+        else:
+            provider = "openai"
 
-        prompt = _RUBRIC_PROMPT.format(
-            assertion=assertion,
-            input=input_text,
-            expected=expected,
-            actual=actual,
-        )
+        criterion_results = []
+        async with httpx.AsyncClient() as client:
+            for item in rubric_items:
+                result = await _score_criterion(
+                    client=client,
+                    input_text=input,
+                    output=output,
+                    expected=expected or "",
+                    criterion=item.get("criterion", ""),
+                    description=item.get("description", ""),
+                    model=model,
+                    provider=provider,
+                )
+                result["weight"] = item.get("weight", 1.0)
+                criterion_results.append(result)
 
-        response = client.messages.create(
-            model=judge_model,
-            max_tokens=512,
-            temperature=0,
-            system=_RUBRIC_SYSTEM,
-            messages=[{"role": "user", "content": prompt}],
-        )
-
-        text = response.content[0].text
-        try:
-            result = json.loads(text)
-            passed = bool(result["passed"])
-            reasoning = result.get("reasoning", "")
-        except (json.JSONDecodeError, KeyError):
-            passed = "true" in text.lower() and "false" not in text.lower()
-            reasoning = text
-
-        score_val = 1.0 if passed else 0.0
+        # Weighted average
+        total_weight = sum(r["weight"] for r in criterion_results)
+        if total_weight > 0:
+            weighted_sum = sum(
+                ((r["score"] - 1) / 4) * r["weight"] for r in criterion_results
+            )
+            normalized = weighted_sum / total_weight
+        else:
+            normalized = 0.0
 
         return MetricResult(
-            metric_type=self.metric_type,
-            score=score_val,
-            passed=score_val >= threshold,
-            threshold=threshold,
+            metric_name="rubric",
+            score=normalized,
             details={
-                "assertion": assertion,
-                "passed": passed,
-                "reasoning": reasoning,
-                "judge_model": judge_model,
+                "criterion_results": criterion_results,
+                "model": model,
             },
         )

@@ -1,52 +1,60 @@
 """Tests for the threshold engine."""
 
-from evalkit.models import MetricResult, MetricType, TestResult
-from evalkit.threshold import evaluate_suite
+from evalkit.threshold import check_thresholds
 
 
-def _make_result(case_id: str, passed: bool, score: float = 1.0) -> TestResult:
-    return TestResult(
-        case_id=case_id,
-        input="test",
-        actual="test",
-        metric_results=[
-            MetricResult(
-                metric_type=MetricType.EXACT_MATCH,
-                score=score,
-                passed=passed,
-                threshold=1.0,
-            )
-        ],
-        passed=passed,
-        weighted_score=score,
-    )
+def test_no_violations():
+    scores = {"exact_match": 0.9, "semantic_similarity": 0.85}
+    thresholds = {"exact_match": 0.5, "semantic_similarity": 0.8}
+    violations = check_thresholds(scores, thresholds)
+    assert len(violations) == 0
 
 
-def test_all_pass():
-    results = [_make_result("c1", True), _make_result("c2", True)]
-    eval_result = evaluate_suite("test", "model", results, suite_pass_rate=1.0)
-    assert eval_result.passed is True
-    assert eval_result.pass_rate == 1.0
+def test_single_violation():
+    scores = {"exact_match": 0.3, "semantic_similarity": 0.85}
+    thresholds = {"exact_match": 0.5, "semantic_similarity": 0.8}
+    violations = check_thresholds(scores, thresholds)
+    assert len(violations) == 1
+    assert violations[0].metric_name == "exact_match"
+    assert violations[0].expected == 0.5
+    assert violations[0].actual == 0.3
 
 
-def test_partial_fail_below_threshold():
-    results = [_make_result("c1", True), _make_result("c2", False, 0.0)]
-    eval_result = evaluate_suite("test", "model", results, suite_pass_rate=0.8)
-    assert eval_result.passed is False
-    assert eval_result.pass_rate == 0.5
+def test_multiple_violations():
+    scores = {"exact_match": 0.3, "semantic_similarity": 0.5}
+    thresholds = {"exact_match": 0.5, "semantic_similarity": 0.8}
+    violations = check_thresholds(scores, thresholds)
+    assert len(violations) == 2
 
 
-def test_partial_fail_above_threshold():
-    results = [
-        _make_result("c1", True),
-        _make_result("c2", True),
-        _make_result("c3", False, 0.0),
-    ]
-    eval_result = evaluate_suite("test", "model", results, suite_pass_rate=0.6)
-    assert eval_result.passed is True
+def test_exact_threshold():
+    scores = {"exact_match": 0.5}
+    thresholds = {"exact_match": 0.5}
+    violations = check_thresholds(scores, thresholds)
+    assert len(violations) == 0
 
 
-def test_empty_suite():
-    eval_result = evaluate_suite("test", "model", [], suite_pass_rate=1.0)
-    assert eval_result.total_cases == 0
-    assert eval_result.pass_rate == 0.0
+def test_missing_metric_in_scores():
+    scores = {}
+    thresholds = {"exact_match": 0.5}
+    violations = check_thresholds(scores, thresholds)
+    assert len(violations) == 1
+    assert violations[0].actual == 0.0
+
+
+def test_empty_thresholds():
+    scores = {"exact_match": 0.1}
+    thresholds = {}
+    violations = check_thresholds(scores, thresholds)
+    assert len(violations) == 0
+
+
+def test_threshold_violation_details():
+    scores = {"llm_judge": 0.65}
+    thresholds = {"llm_judge": 0.7}
+    violations = check_thresholds(scores, thresholds)
+    assert len(violations) == 1
+    v = violations[0]
+    assert v.metric_name == "llm_judge"
+    assert v.expected == 0.7
+    assert v.actual == 0.65

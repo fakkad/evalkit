@@ -1,39 +1,100 @@
-"""Tests for metric engines (non-LLM metrics only)."""
+"""Tests for metric engines."""
+
+import pytest
 
 from evalkit.metrics.exact_match import ExactMatchMetric
-from evalkit.models import MetricType
+from evalkit.metrics.semantic_similarity import SemanticSimilarityMetric, _cosine_similarity
+from evalkit.metrics.llm_judge import LLMJudgeMetric
+from evalkit.metrics.rubric import RubricMetric
 
 
 class TestExactMatch:
-    def setup_method(self):
-        self.metric = ExactMatchMetric()
+    @pytest.fixture
+    def metric(self):
+        return ExactMatchMetric()
 
-    def test_exact_match_identical(self):
-        result = self.metric.score("hello world", "hello world")
+    @pytest.mark.asyncio
+    async def test_identical_strings(self, metric):
+        result = await metric.score(
+            input="test", output="hello world", expected="hello world"
+        )
         assert result.score == 1.0
-        assert result.passed is True
+        assert result.metric_name == "exact_match"
 
-    def test_exact_match_case_insensitive(self):
-        result = self.metric.score("Hello World", "hello world")
-        assert result.score == 1.0
-
-    def test_exact_match_whitespace_normalization(self):
-        result = self.metric.score("hello  world", "hello world")
-        assert result.score == 1.0
-
-    def test_exact_match_failure(self):
-        result = self.metric.score("hello", "goodbye")
-        assert result.score == 0.0
-        assert result.passed is False
-
-    def test_exact_match_ignore_punctuation(self):
-        result = self.metric.score(
-            "hello, world!", "hello world", params={"ignore_punctuation": True}
+    @pytest.mark.asyncio
+    async def test_case_insensitive(self, metric):
+        result = await metric.score(
+            input="test", output="Hello World", expected="hello world"
         )
         assert result.score == 1.0
 
-    def test_exact_match_strict(self):
-        result = self.metric.score(
-            "Hello", "hello", params={"ignore_case": False, "normalize": False}
+    @pytest.mark.asyncio
+    async def test_whitespace_normalization(self, metric):
+        result = await metric.score(
+            input="test", output="hello  world", expected="hello world"
+        )
+        assert result.score == 1.0
+
+    @pytest.mark.asyncio
+    async def test_mismatch(self, metric):
+        result = await metric.score(
+            input="test", output="goodbye", expected="hello"
         )
         assert result.score == 0.0
+
+    @pytest.mark.asyncio
+    async def test_ignore_punctuation(self, metric):
+        result = await metric.score(
+            input="test",
+            output="hello world",
+            expected="hello, world!",
+            params={"ignore_punctuation": True},
+        )
+        assert result.score == 1.0
+
+    @pytest.mark.asyncio
+    async def test_strict_mode(self, metric):
+        result = await metric.score(
+            input="test",
+            output="hello",
+            expected="Hello",
+            params={"ignore_case": False, "normalize": False},
+        )
+        assert result.score == 0.0
+
+    @pytest.mark.asyncio
+    async def test_no_expected(self, metric):
+        result = await metric.score(input="test", output="hello")
+        assert result.score == 0.0
+        assert "error" in result.details
+
+    @pytest.mark.asyncio
+    async def test_fuzzy_matching(self, metric):
+        result = await metric.score(
+            input="test",
+            output="hello world",
+            expected="hello worl",
+            params={"fuzzy_threshold": 0.8},
+        )
+        assert result.score > 0.8
+
+
+class TestCosineUtil:
+    def test_identical_vectors(self):
+        v = [1.0, 0.0, 0.0]
+        assert abs(_cosine_similarity(v, v) - 1.0) < 1e-6
+
+    def test_orthogonal_vectors(self):
+        a = [1.0, 0.0]
+        b = [0.0, 1.0]
+        assert abs(_cosine_similarity(a, b)) < 1e-6
+
+    def test_zero_vector(self):
+        a = [0.0, 0.0]
+        b = [1.0, 1.0]
+        assert _cosine_similarity(a, b) == 0.0
+
+    def test_opposite_vectors(self):
+        a = [1.0, 0.0]
+        b = [-1.0, 0.0]
+        assert abs(_cosine_similarity(a, b) + 1.0) < 1e-6

@@ -1,96 +1,160 @@
-"""LLM Judge metric — G-Eval: CoT evaluation steps from rubric, score 1-10."""
+"""LLM Judge metric -- G-Eval style scoring via judge LLM."""
 
 from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 
-from evalkit.models import MetricResult, MetricType
+import httpx
 
-_COT_SYSTEM = """You are an expert evaluator. Given a task description and evaluation criteria, generate detailed chain-of-thought evaluation steps, then score the response.
+from evalkit.metrics.base import Metric
+from evalkit.models import MetricResult
+
+_JUDGE_SYSTEM = """You are an expert evaluator. You will be given a prompt, an LLM response, and evaluation criteria. Evaluate the response using chain-of-thought reasoning, then assign a score from 1 (terrible) to 5 (excellent).
 
 Return ONLY valid JSON with this schema:
 {
-  "reasoning": "step-by-step evaluation reasoning",
-  "score": <integer 1-10>
+  "reasoning": "your step-by-step evaluation",
+  "score": <integer 1-5>
 }"""
 
-_EVAL_PROMPT = """## Task
-{task}
+_JUDGE_PROMPT = """## Original Prompt
+{input}
+
+## LLM Response
+{output}
+
+## Expected Output (reference)
+{expected}
 
 ## Evaluation Criteria
 {criteria}
 
-## Expected Output
-{expected}
-
-## Actual Output
-{actual}
-
-Evaluate the actual output against the expected output using the criteria above. Think step by step, then provide a score from 1 (completely wrong) to 10 (perfect)."""
+Evaluate the LLM response against the criteria. Think step by step, then provide a score from 1 to 5."""
 
 
-class LLMJudgeMetric:
-    """G-Eval style LLM judge. Generates CoT eval steps, scores 1-10, normalizes to 0-1."""
+async def _call_judge(
+    client: httpx.AsyncClient,
+    prompt: str,
+    system: str,
+    model: str,
+    provider: str,
+    max_retries: int = 3,
+) -> dict[str, Any]:
+    """Call the judge LLM with retry logic."""
+    api_key_env = "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY"
+    api_key = os.environ.get(api_key_env, "")
 
-    metric_type = MetricType.LLM_JUDGE
+    for attempt in range(max_retries):
+        try:
+            if provider == "anthropic":
+                response = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": api_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "max_tokens": 1024,
+                        "temperature": 0,
+                        "system": system,
+                        "messages": [{"role": "user", "content": prompt}],
+                    },
+                    timeout=60.0,
+                )
+                response.raise_for_status()
+                data = response.json()
+                text = data["content"][0]["text"]
+            else:
+                response = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "temperature": 0,
+                        "max_tokens": 1024,
+                        "messages": [
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": prompt},
+                        ],
+                    },
+                    timeout=60.0,
+                )
+                response.raise_for_status()
+                data = response.json()
+                text = data["choices"][0]["message"]["content"]
 
-    def score(
+            # Parse JSON response
+            result = json.loads(text)
+            return result
+
+        except (httpx.HTTPStatusError, json.JSONDecodeError, KeyError) as e:
+            if attempt == max_retries - 1:
+                # Last attempt: try to extract score from raw text
+                if "text" in dir():
+                    match = re.search(r"\b([1-5])\b", text)  # type: ignore[has-type]
+                    score = int(match.group(1)) if match else 3
+                    return {"reasoning": text, "score": score}  # type: ignore[has-type]
+                return {"reasoning": f"judge call failed: {e}", "score": 3}
+
+    return {"reasoning": "max retries exceeded", "score": 3}
+
+
+class LLMJudgeMetric(Metric):
+    """G-Eval style LLM judge. Scores 1-5, normalized to 0-1."""
+
+    async def score(
         self,
-        expected: str,
-        actual: str,
-        threshold: float = 0.7,
+        input: str,
+        output: str,
+        expected: str | None = None,
         params: dict[str, Any] | None = None,
     ) -> MetricResult:
         params = params or {}
-        criteria = params.get(
-            "criteria", "Accuracy, completeness, and relevance of the response."
-        )
-        task = params.get("task", "Evaluate the quality of the LLM response.")
-        judge_model = params.get("judge_model", "claude-haiku-4-5-20241022")
+        criteria = params.get("criteria", "helpfulness")
+        model = params.get("model", "claude-haiku-4-5-20251001")
 
-        import anthropic
+        # Determine provider from model name
+        if "claude" in model:
+            provider = "anthropic"
+        else:
+            provider = "openai"
 
-        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-
-        prompt = _EVAL_PROMPT.format(
-            task=task, criteria=criteria, expected=expected, actual=actual
-        )
-
-        response = client.messages.create(
-            model=judge_model,
-            max_tokens=1024,
-            temperature=0,
-            system=_COT_SYSTEM,
-            messages=[{"role": "user", "content": prompt}],
+        prompt = _JUDGE_PROMPT.format(
+            input=input,
+            output=output,
+            expected=expected or "(none provided)",
+            criteria=criteria,
         )
 
-        text = response.content[0].text
-        try:
-            result = json.loads(text)
-            raw_score = int(result["score"])
-            reasoning = result.get("reasoning", "")
-        except (json.JSONDecodeError, KeyError, ValueError):
-            # Fallback: try to extract score from text
-            import re
+        async with httpx.AsyncClient() as client:
+            result = await _call_judge(
+                client=client,
+                prompt=prompt,
+                system=_JUDGE_SYSTEM,
+                model=model,
+                provider=provider,
+            )
 
-            match = re.search(r"\b(\d+)\s*/?\s*10\b", text)
-            raw_score = int(match.group(1)) if match else 5
-            reasoning = text
-
-        raw_score = max(1, min(10, raw_score))
-        normalized = (raw_score - 1) / 9  # map 1-10 to 0.0-1.0
+        raw_score = max(1, min(5, int(result.get("score", 3))))
+        normalized = (raw_score - 1) / 4  # map 1-5 to 0.0-1.0
+        reasoning = result.get("reasoning", "")
 
         return MetricResult(
-            metric_type=self.metric_type,
+            metric_name="llm_judge",
             score=normalized,
-            passed=normalized >= threshold,
-            threshold=threshold,
             details={
                 "raw_score": raw_score,
                 "normalized_score": normalized,
                 "reasoning": reasoning,
-                "judge_model": judge_model,
+                "judge_model": model,
+                "criteria": criteria,
             },
         )

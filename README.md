@@ -1,46 +1,6 @@
 # EvalKit
 
-CLI-first LLM evaluation framework. Define test suites in YAML, score outputs with 4 metric types, enforce pass/fail thresholds in CI.
-
-## Why
-
-Existing eval frameworks (DeepEval, promptfoo) are platform-coupled or heavyweight. EvalKit is a pip-installable CLI that owns the scoring math and blocks CI on regressions. It's pytest for LLM outputs.
-
-## How It Fits
-
-```
-┌─────────────┐     ┌─────────────┐     ┌──────────────┐
-│ JudgeBench  │────>│   EvalKit   │────>│  DriftWatch  │
-│ validates   │     │ scores each │     │ tracks drift │
-│ the judge   │     │ LLM output  │     │ over time    │
-└─────────────┘     └─────────────┘     └──────────────┘
-```
-
-JudgeBench calibrates the LLM judge. **EvalKit** uses that judge (plus 3 other metrics) to score outputs. DriftWatch runs EvalKit on every PR to catch regressions.
-
-## Architecture
-
-```mermaid
-flowchart LR
-    YAML[YAML Test Suite] --> Runner
-    Runner --> Executor[Model Executor]
-    Executor --> |actual output| Scorer
-    Scorer --> EM[exact_match]
-    Scorer --> SS[semantic_sim]
-    Scorer --> LJ[llm_judge / G-Eval]
-    Scorer --> RB[rubric]
-    EM & SS & LJ & RB --> Threshold[Threshold Engine]
-    Threshold --> |AND logic| Result{PASS / FAIL}
-    Result --> JSONL[Results JSONL]
-    Result --> HTML[HTML Report]
-    Result --> |exit code| CI[CI Gate]
-```
-
-## HTML Report
-
-`evalkit report results/ --output report.html` generates a per-run dashboard with pass/fail badges, score bars, and metric breakdowns:
-
-![EvalKit Report](docs/report-screenshot.png)
+CLI eval harness for LLMs. Define test suites in YAML, score outputs with 4 metric types, enforce pass/fail thresholds. HTML report + JSON results.
 
 ## Install
 
@@ -50,117 +10,86 @@ pip install -e .
 
 ## Quick Start
 
-### 1. Define a test suite
+```bash
+# Generate an example suite
+evalkit init --output suite.yaml
+
+# Validate a suite
+evalkit validate suite.yaml
+
+# Run evals (requires ANTHROPIC_API_KEY / OPENAI_API_KEY)
+evalkit run suite.yaml --output-dir ./results --format both
+
+# Compare two runs
+evalkit compare results1.json results2.json --output diff.html
+```
+
+## YAML Config Format
 
 ```yaml
-# evals/qa.yaml
-schema_version: 1
-name: qa-basic
-model: claude-sonnet-4-20250514
-suite_pass_rate: 0.8
-
-cases:
-  - id: capital-france
-    input: "What is the capital of France?"
-    expected: "Paris"
-    metrics:
-      - type: exact_match
-        threshold: 1.0
-
-  - id: explain-photosynthesis
-    input: "Explain photosynthesis in one sentence."
-    expected: "Plants convert sunlight, water, and CO2 into glucose and oxygen."
-    metrics:
-      - type: semantic_sim
-        threshold: 0.75
-
-  - id: summarize-gravity
-    input: "Summarize Newton's law of gravitation."
-    expected: "Objects attract each other proportional to mass, inverse to distance squared."
-    metrics:
-      - type: semantic_sim
-        threshold: 0.7
-        weight: 0.6
-      - type: llm_judge
-        threshold: 0.6
-        weight: 0.4
-        params:
-          criteria: "Accuracy, clarity, completeness."
-```
-
-### 2. Run it
-
-```bash
-export ANTHROPIC_API_KEY=your-key
-evalkit run evals/qa.yaml --output results/run1.jsonl
-```
-
-```
-Running suite: qa-basic (5 cases)
-Model: claude-sonnet-4-20250514
-
-  [1/5] capital-france... PASS (score: 1.00)
-  [2/5] explain-photosynthesis... PASS (score: 0.92)
-  [3/5] summarize-gravity... PASS (score: 0.88)
-  [4/5] python-fizzbuzz... PASS (score: 1.00)
-  [5/5] sentiment-positive... PASS (score: 1.00)
-
-┌─────────────────────────────────┐
-│          Eval Summary           │
-├────────────┬────────────────────┤
-│ Suite      │           qa-basic │
-│ Model      │ claude-sonnet-4-…  │
-│ Status     │             PASSED │
-│ Pass Rate  │             100.0% │
-│ Cases      │                5/5 │
-│ Mean Score │              0.960 │
-└────────────┴────────────────────┘
-```
-
-Exit codes: `0` = passed, `1` = failed, `2` = error.
-
-### 3. Compare runs
-
-```bash
-evalkit compare results/baseline.jsonl results/new.jsonl
-```
-
-Shows regressions, improvements, and score deltas per case.
-
-### 4. Generate HTML report
-
-```bash
-evalkit report results/ --output report.html
+name: "my-eval-suite"
+description: "Tests for customer support bot"
+model:
+  provider: "anthropic"  # or "openai"
+  model: "claude-sonnet-4-20250514"
+  params:
+    temperature: 0
+    max_tokens: 1024
+test_cases:
+  - id: "greeting-1"
+    input: "Hello, I need help with my order"
+    expected_output: "I'd be happy to help you with your order"
+    metadata:
+      category: "greeting"
+metrics:
+  - type: "exact_match"
+  - type: "semantic_similarity"
+    params:
+      model: "text-embedding-3-small"
+  - type: "llm_judge"
+    params:
+      criteria: "helpfulness"
+      model: "claude-haiku-4-5-20251001"
+  - type: "rubric"
+    params:
+      rubric:
+        - criterion: "tone"
+          description: "Response is professional and empathetic"
+          weight: 0.4
+        - criterion: "accuracy"
+          description: "Response addresses the user's actual request"
+          weight: 0.6
+thresholds:
+  exact_match: 0.5
+  semantic_similarity: 0.8
+  llm_judge: 0.7
+  rubric: 0.75
 ```
 
 ## Metrics
 
-| Metric | Description | Params |
-|--------|-------------|--------|
-| `exact_match` | Normalized string comparison | `normalize`, `ignore_case`, `ignore_punctuation` |
-| `semantic_sim` | Cosine similarity via sentence-transformers (all-MiniLM-L6-v2) | `model` |
-| `llm_judge` | G-Eval: generate CoT eval steps from rubric, score 1-10, normalize | `criteria`, `task`, `judge_model` |
-| `rubric` | Binary pass/fail LLM assertion | `assertion`, `input`, `judge_model` |
+| Metric | Description |
+|--------|-------------|
+| `exact_match` | Normalized string comparison (lowercase, strip whitespace, optional fuzzy) |
+| `semantic_similarity` | OpenAI embeddings API + cosine similarity, cached |
+| `llm_judge` | G-Eval style: prompt + response + criteria to judge LLM, score 1-5, normalize to 0-1 |
+| `rubric` | Multi-criteria weighted rubric: each criterion scored 1-5 by LLM, weighted average |
 
-## Design Decisions
+## CLI Commands
 
-- **AND logic** — all metrics must pass per case (conservative for CI gating)
-- **YAML** for test suite definitions, **JSONL** for result logs
-- **Temperature=0** for all LLM judge calls (reproducibility)
-- **Versioned result schema** (`schema_version: 1`)
-- **G-Eval** implementation follows Zheng et al. (NeurIPS 2023) — generate evaluation CoT, then score
-
-## CI Integration
-
-```yaml
-# .github/workflows/eval.yml
-- name: Run evals
-  run: evalkit run evals/qa.yaml
-  env:
-    ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+evalkit run <suite.yaml> [--output-dir ./results] [--format json|html|both]
+evalkit compare <results1.json> <results2.json> [--output report.html]
+evalkit validate <suite.yaml>
+evalkit init [--output suite.yaml]
 ```
 
-Non-zero exit blocks the PR.
+Exit code 0 = all thresholds met. Exit code 1 = threshold violations.
+
+## Environment Variables
+
+- `ANTHROPIC_API_KEY` -- required for Anthropic provider and Claude-based judge/rubric
+- `OPENAI_API_KEY` -- required for OpenAI provider and semantic similarity embeddings
 
 ## License
 

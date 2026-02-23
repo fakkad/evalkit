@@ -1,0 +1,45 @@
+name: "my-eval-suite"
+description: "Tests for customer support bot"
+model:
+  provider: "anthropic"
+  model: "claude-sonnet-4-20250514"
+  params:
+    temperature: 0
+    max_tokens: 1024
+test_cases:
+  - id: "greeting-1"
+    input: "Hello, I need help with my order"
+    expected_output: "I'd be happy to help you with your order"
+    metadata:
+      category: "greeting"
+  - id: "refund-1"
+    input: "I want a refund"
+    expected_output: "I can help you process a refund"
+  - id: "factual-1"
+    input: "What is the capital of France?"
+    expected_output: "Paris"
+    metadata:
+      category: "factual"
+metrics:
+  - type: "exact_match"
+  - type: "semantic_similarity"
+    params:
+      model: "text-embedding-3-small"
+  - type: "llm_judge"
+    params:
+      criteria: "helpfulness"
+      model: "claude-haiku-4-5-20251001"
+  - type: "rubric"
+    params:
+      rubric:
+        - criterion: "tone"
+          description: "Response is professional and empathetic"
+          weight: 0.4
+        - criterion: "accuracy"
+          description: "Response addresses the user's actual request"
+          weight: 0.6
+thresholds:
+  exact_match: 0.5
+  semantic_similarity: 0.8
+  llm_judge: 0.7
+  rubric: 0.75
