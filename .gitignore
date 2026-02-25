@@ -9,7 +9,11 @@ build/
 .venv/
 venv/
 .env
+.env.*
 .envrc
+*.key
+*.pem
+credentials*
 *.so
 .pytest_cache/
 .mypy_cache/
